@@ -1,0 +1,21 @@
+ZmBridge:
+  module: zmbapp
+  class: ZmEventHandler
+  zm_url: 'https://justinkerin.duckdns.org/zm'
+  zmapi_loc: '/api'
+  zmapi_use_token: true
+  zm_user: !secret zm_user
+  zm_pw: !secret zm_passwd
+  img_width: 1200
+  img_cache_dir: '/config/www'
+  img_frame_type: 'o'
+  txt_blk_list:
+    - Linked
+    - Motion
+    - 'garage steps'
+  sensors:
+    garage_alert_desc: 'input_boolean.garage_notify'
+    driveway_alert_desc: 'input_boolean.driveway_notify'
+    sidewalk_alert_desc: 'input_boolean.front_sidewalk_notify'
+  notify:
+    - dennis_hangout
