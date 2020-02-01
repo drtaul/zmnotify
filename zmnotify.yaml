@@ -1,7 +1,7 @@
-ZmBridge:
-  module: zmbapp
-  class: ZmEventHandler
-  zm_url: 'https://justinkerin.duckdns.org/zm'
+ZmNotify:
+  module: zmnotify
+  class: ZmEventNotifier
+  zm_url: !secret zm_url
   zmapi_loc: '/api'
   zmapi_use_token: true
   zm_user: !secret zm_user
@@ -18,4 +18,4 @@ ZmBridge:
     driveway_alert_desc: 'input_boolean.driveway_notify'
     sidewalk_alert_desc: 'input_boolean.front_sidewalk_notify'
   notify:
-    - dennis_hangout
+    - !secret zmnotify_hangout
