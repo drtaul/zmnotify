@@ -23,6 +23,7 @@ class Zmes(zmAPI.ZMApi):
     This is a placeholder until the ZMApi class and pyzm helpers
     are extended to support the functions provided by this class.
     '''
+
     def __init__(self, options={}):
         super(Zmes, self).__init__(options)
 
@@ -163,10 +164,21 @@ class ZmEventNotifier(hass.Hass):
         # at this point we should authenticated with zoneminder
         self.log('Zoneminder ES Handler init completed')
 
-
-    def save_image_to_file(self, event_id, fid, img_data, suffix_list=img_types):
+    def check_image_file_type(self, img_data, suffix_list=img_types):
+        """
+        Check that the reported file type is something we know how to process
+        :param img_data: raw image data from http get request
+        :param suffix_list: list of supported file types
+        :return: string indicating filetype or None if not supported
+        """
         filetype = img_data.headers['Content-Type'].split('/')[1]
         self.log("ZM ES Handler img file type: {}".format(filetype))
+        if filetype in suffix_list:
+            return filetype
+        else:
+            return None
+
+    def save_image_to_file(self, event_id, fid, img_data, filetype, suffix_list=img_types):
         if filetype in suffix_list:
             filename = '{}-ev{}.{}'.format(fid, event_id, filetype)
             filepath = os.path.join(self.img_cache_dir, filename)
@@ -200,7 +212,7 @@ class ZmEventNotifier(hass.Hass):
         for item in blk_list:
             r_txt = r_txt.replace(item, '')
         return r_txt
-        
+
     def handle_state_change(self, entity, attribute, old, new, kwargs):
         """
         generate notifications for camera motion
@@ -214,7 +226,6 @@ class ZmEventNotifier(hass.Hass):
         :param kwargs:
         :return: None
         """
-
         # is the notify gate on for the camera reporting object detection?
         if self.get_state(self.sensors[entity]) == 'on':
             self.log('Zoneminder ES Handler processing state change for entity: {}'.format(entity))
@@ -225,28 +236,33 @@ class ZmEventNotifier(hass.Hass):
             frame, txt_body = sub_detail.split('] ')
             txt_body = self.clean_text_msg(txt_body, self.txt_blk_list)
             msg_title = '{} Camera alert @{}\n'.format(camera, timestamp)
-            fid = self.get_fid(frame[1:])
+            fid = frame[1:]
             # attempt to pull the image based on the configured frame type
             # but if not available, pull the type indicated in the name/msg field
             ft_set = set([self.img_frame_type, fid])
+            raw_img_data = None
+            img_file_type = None
             for entry in ft_set:
-                raw_img_data = self.zm_api.get_event_image_data(event_id, 
+                raw_img_data = self.zm_api.get_event_image_data(event_id,
                                                                 fid=self.get_fid(entry), px_width=self.img_width)
-                if raw_img_data is not None:
+                img_file_type = self.check_image_file_type(raw_img_data)
+                if raw_img_data is not None and img_file_type is not None:
                     self.log("Successfully pulled Zoneminder image for event id:{} camera: {} msg: {} "
                              "frame type [{}]".format(event_id, camera, txt_body, entry))
                     break
-            if raw_img_data is None:
+            if img_file_type is not None:
+                img_file_uri = self.save_image_to_file(event_id, fid, raw_img_data, filetype=img_file_type)
+                if img_file_uri is not None:
+                    for notifier in self.notify_list:
+                        notify_path = 'notify/' + notifier
+                        self.log("ZM ES Handler: sending text to {} for event: {}".format(notify_path, event_id))
+                        self.call_service(notify_path, message=txt_body, title=msg_title,
+                                          data={'image_file': img_file_uri})
+                else:
+                    self.log("ZM ES Handler: failed to save image file for event: {}".format(event_id))
+            else:
                 self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id, camera,
                                                                                                      txt_body))
-            img_file_uri = self.save_image_to_file(event_id, fid, raw_img_data)
-            if img_file_uri is not None:
-                for notifier in self.notify_list:
-                    notify_path = 'notify/' + notifier
-                    self.log("ZM ES Handler: sending text to {} for event: {}".format(notify_path, event_id))
-                    self.call_service(notify_path, message=txt_body, title=msg_title, data={'image_file': img_file_uri})
-            else:
-                self.log("ZM ES Handler: failed to save image file for event: {}".format(event_id))
         else:
             self.log("ZM ES Handler: notify gate is turned off for entity: {}".format(entity))
         return

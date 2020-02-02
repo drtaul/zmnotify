@@ -18,4 +18,4 @@ ZmNotify:
     driveway_alert_desc: 'input_boolean.driveway_notify'
     sidewalk_alert_desc: 'input_boolean.front_sidewalk_notify'
   notify:
-    - !secret zmnotify_hangout
+    - !secret zm_notify_hangout
