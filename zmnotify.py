@@ -12,9 +12,17 @@ import os
 import traceback
 import appdaemon.plugins.hass.hassapi as hass
 import pyzm.api as zmAPI
+import pyzm.helpers as zmtypes
 import requests
 from io import open as iopen
 from datetime import datetime as dt
+import logging
+
+__version__ = '0.1'
+
+
+def versiontuple(v):
+    return tuple(map(int, (v.split("."))))
 
 
 class Zmes(zmAPI.ZMApi):
@@ -103,6 +111,134 @@ class Zmes(zmAPI.ZMApi):
         return rsp
 
 
+class ZmMonitor():
+    '''
+    Wrapper for Zoneminder Monitor object.
+    This tracks the current state of the monitor e.g. Nodect, Modect, None etc.
+    The user should specify what the enabled state should be e.g. Modect.
+    Instances of this class are used to 'turn off' the camera when the associated notify gate is off.
+    '''
+    def __init__(self, zmapi, mo, function, options, logger):
+        self._zmapi = zmapi
+        self._zm_monitor = mo
+        self._settings = {}
+        self.logger = logger
+        for key, value in options.items():
+            self._settings[key] = options[key]
+        self._settings['function'] = function
+        self._zm_function = mo.function()
+        self.log("Monitor {} is reporting function {}".format(mo.name(), self._zm_function))
+
+    def log(self, msg, *args, **kwargs):
+        level = logging.INFO
+        self.logger.log(level, msg, *args, **kwargs)
+
+    def id(self):
+        return self._zm_monitor.id()
+
+    def find_event(self, event_id, start_time='1 hour ago'):
+        evid = int(event_id)
+        options = {}
+        options['from'] = start_time
+        event_list = self._zm_monitor.events(options).list()
+        self.log("ZM Monitor {} reporting {} events".format(self._zm_monitor.name(), len(event_list)))
+        # return next((x for x in event_list if x.id() == event_id), None)
+        rv = None
+        for x in event_list:
+            if x.id() == evid:
+                rv = x
+                break
+        return rv
+
+    def set_function_state(self, function):
+        if function != self._zm_function:
+            options = {}
+            options['function'] = function
+            self.log(
+                "Monitor {} change func from {} to {}".format(self._zm_monitor.name(), self._zm_function, function))
+            self._zm_monitor.set_parameter(options)
+            self._zm_function = function
+
+    def enable_function(self):
+        self.set_function_state(self._settings['function'])
+
+
+class HASensor():
+    '''
+    Home Assistant Sensor. This is a proxy for the sensor defined in Home Assistant for the
+    Zoneminder monitor. This sensor should be a MQTT sensor.
+    '''
+    def __init__(self, ad_parent, name, attributes, logger):
+        self._ad = ad_parent
+        self._name = name
+        self.logger = logger
+        zm_monitor = None
+        zm_cntrl_data = None
+        for key, value in attributes.items():
+            if key == 'zm_monitor':
+                mname = value['name']
+                mfnc = value['function']
+                zm_monitor = self._ad.zm_api.monitors().find(name=mname)
+                if zm_monitor is None:
+                    self.log('Failed to find Zoneminder monitor: {}'.format(mname))
+            elif key == 'zm_control':
+                zm_cntrl_data = attributes[key]
+            elif key == 'ha_gate':
+                self._gate = attributes[key]
+
+        if zm_monitor is not None:
+            self._monitor = ZmMonitor(ad_parent.zm_api, zm_monitor, mfnc, zm_cntrl_data, logger)
+        else:
+            raise TypeError
+
+        self._current_gate_state = self._ad.get_state(self._gate)
+        self.log("{} is currently {}".format(self._gate, self._current_gate_state))
+        if self._current_gate_state == "off":
+            self._monitor.set_function_state('None')
+        elif self._current_gate_state == "on":
+            self._monitor.enable_function()
+
+        self._ad.listen_state(self.handle_state_change, self._gate)
+
+    def log(self, msg, *args, **kwargs):
+        level = logging.INFO
+        self.logger.log(level, msg, *args, **kwargs)
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def ha_gate(self):
+        return self._gate
+
+    def monitor(self):
+        return self._monitor
+
+    def monitor_id(self):
+        return self._monitor.id()
+
+    def handle_state_change(self, entity, attribute, old, new, kwargs):
+        """
+        Callback hook called on input_boolean notify gate.
+        The notify gate is a simple user button that can be turned on or off to easily
+        enable or disable processing zoneminder events.
+
+        :param entity: name of HA entity that has changed state
+        :param attribute:
+        :param old: previous state (off or on)
+        :param new: new/current state of off or on
+        :param kwargs:
+        """
+        self.log("Sensor state change reported on {} from {} to {}".format(self.name, old, new))
+        if new == "on":
+            self._monitor.enable_function()
+        elif new == "off":
+            self._monitor.set_function_state('None')
+        else:
+            self.log("ERROR: unexpected state change to {}".format(new))
+
+
 # noinspection PyAttributeOutsideInit
 class ZmEventNotifier(hass.Hass):
     '''
@@ -111,8 +247,10 @@ class ZmEventNotifier(hass.Hass):
     zm_api: Zmes
     img_types = ['jpg', 'gif', 'png', 'tif', 'svg', 'jpeg']
     ts_fmt = '%a %I:%M %p'
+    log_header = 'ZM ES Handler'
 
     def init(self):
+        self._version = __version__
         self.notify_list = []
         self.zm_options = {
             'apiurl': None,
@@ -125,12 +263,17 @@ class ZmEventNotifier(hass.Hass):
         self.zm_api = None
         self.img_width = 600
         self.img_cache_dir = '/tmp'
+        self.zm_monitors = None
+
+    @staticmethod
+    def version():
+        return __version__
 
     def initialize(self):
         """
         initialize() function which will be called at startup and reload
         """
-        self.log('Zoneminder ES Handler initializing')
+        self.log('{} initializing'.format(self.log_header))
         self.init()
         try:
             self.zm_options['apiurl'] = self.args["zm_url"] + self.args["zmapi_loc"]
@@ -140,12 +283,6 @@ class ZmEventNotifier(hass.Hass):
             self.img_cache_dir = self.args["img_cache_dir"]
             self.img_frame_type = self.args["img_frame_type"]
             self.txt_blk_list = self.args["txt_blk_list"]
-            # sensors is a dict of sensorid with associated notify gate
-            for sensor in self.args["sensors"]:
-                new_sensor = "sensor." + sensor
-                self.log("adding listener for sensor {}".format(new_sensor))
-                self.sensors[new_sensor] = self.args["sensors"][sensor]
-                self.listen_state(self.handle_state_change, new_sensor)
             for notify_id in self.args["notify"]:
                 self.notify_list.append(notify_id)
             if not self.args["zmapi_use_token"]:
@@ -161,38 +298,61 @@ class ZmEventNotifier(hass.Hass):
                 self.error('Error: {}'.format(str(e)))
                 self.error(traceback.format_exc())
                 raise
+        # sensors is a dict of sensorid with associated notify gate
+        for sensor in self.args["sensors"]:
+            new_sensor = "sensor." + sensor
+            self.log("adding listener for sensor {}".format(new_sensor))
+            self.sensors[new_sensor] = HASensor(self, new_sensor, self.args["sensors"][sensor], self.logger)
+            self.listen_state(self.handle_state_change, new_sensor)
+
         # at this point we should authenticated with zoneminder
         self.log('Zoneminder ES Handler init completed')
 
-    def check_image_file_type(self, img_data, suffix_list=img_types):
+    def write_file_to_local_cache(self, img_data, filepath):
+        """
+        Save image data to specfied file
+        :param img_data: raw data from http get request
+        :param filepath: complete local file path
+        """
+        with iopen(filepath, 'wb') as file:
+            file.write(img_data.content)
+
+    def gen_file_path(self, fname, ftype):
+        filepath = os.path.join(self.img_cache_dir, fname + '.' + ftype)
+        cntr = 0
+        while os.path.exists(filepath):
+            nfilenam = '{}_{}'.format(fname, cntr)
+            filepath = os.path.join(self.img_cache_dir, nfilenam + '.' + ftype)
+            cntr += 1
+        return filepath
+
+    def get_image_file_type(self, img_data, suffix_list=img_types):
         """
         Check that the reported file type is something we know how to process
         :param img_data: raw image data from http get request
         :param suffix_list: list of supported file types
         :return: string indicating filetype or None if not supported
         """
-        filetype = img_data.headers['Content-Type'].split('/')[1]
-        self.log("ZM ES Handler img file type: {}".format(filetype))
-        if filetype in suffix_list:
+        if img_data is not None:
+            filetype = img_data.headers['Content-Type'].split('/')[1]
+            self.log("ZM ES Handler: img file type: {}".format(filetype))
             return filetype
-        else:
-            return None
+        return None
 
-    def save_image_to_file(self, event_id, fid, img_data, filetype, suffix_list=img_types):
-        if filetype in suffix_list:
-            filename = '{}-ev{}.{}'.format(fid, event_id, filetype)
-            filepath = os.path.join(self.img_cache_dir, filename)
-            cntr = 0
-            while os.path.exists(filepath):
-                nfilenam = '{}-ev{}_{}.{}'.format(fid, event_id, cntr, filetype)
-                filepath = os.path.join(self.img_cache_dir, nfilenam)
-                cntr += 1
+    def is_image_file_type_supported(self, filetype):
+        return filetype in self.img_types
+
+    def save_image_to_file(self, event_id, fid, img_data, filetype):
+        filename = '{}-ev{}'.format(fid, event_id)
+        filepath = self.gen_file_path(filename, filetype)
+        if self.is_image_file_type_supported(filetype):
             self.log('Writing image file {}'.format(filepath))
-            with iopen(filepath, 'wb') as file:
-                file.write(img_data.content)
+            self.write_file_to_local_cache(img_data, filepath)
             return filepath
         else:
-            self.error("ZM ES Handler: filetype {} not in supported files, aborting".format(filetype))
+            self.error("{}: image filetype {} NOT SUPPORTED".format(self.log_header, filetype))
+            self.log('Writing invalid image file {}'.format(filepath))
+            self.write_file_to_local_cache(img_data, filepath)
             return None
 
     def get_fid(self, frame_code):
@@ -227,8 +387,9 @@ class ZmEventNotifier(hass.Hass):
         :return: None
         """
         # is the notify gate on for the camera reporting object detection?
-        if self.get_state(self.sensors[entity]) == 'on':
-            self.log('Zoneminder ES Handler processing state change for entity: {}'.format(entity))
+        zm_sensor = self.sensors[entity]
+        if self.get_state(zm_sensor.ha_gate) == 'on':
+            self.log('processing state change for entity: {}'.format(entity))
             # gate is on, so proceed with notifications
             timestamp = dt.now().strftime(self.__class__.ts_fmt)
             camera, detail = new.split(':(')
@@ -237,21 +398,35 @@ class ZmEventNotifier(hass.Hass):
             txt_body = self.clean_text_msg(txt_body, self.txt_blk_list)
             msg_title = '{} Camera alert @{}\n'.format(camera, timestamp)
             fid = frame[1:]
+            zm_event = zm_sensor.monitor().find_event(event_id)
+            if zm_event is not None:
+                self.log("found ZM Event ({}) for id {}".format(zm_event.name(), zm_event.id()))
+            else:
+                self.error("failed to find ZM Event for id {}".format(event_id))
             # attempt to pull the image based on the configured frame type
             # but if not available, pull the type indicated in the name/msg field
-            ft_set = set([self.img_frame_type, fid])
+            ftl = [self.img_frame_type, fid]
+            ft_min_set = [i for n, i in enumerate(ftl) if i not in ftl[:n]]
             raw_img_data = None
             img_file_type = None
-            for entry in ft_set:
-                raw_img_data = self.zm_api.get_event_image_data(event_id,
-                                                                fid=self.get_fid(entry), px_width=self.img_width)
-                img_file_type = self.check_image_file_type(raw_img_data)
-                if raw_img_data is not None and img_file_type is not None:
+            attempt = 1
+            for entry in ft_min_set:
+                self.log("Attempt #({}): pull image file with fid: {}".format(attempt, entry))
+                for retry in range(0,1):
+                    raw_img_data = self.zm_api.get_event_image_data(event_id,
+                                                                    fid=self.get_fid(entry), px_width=self.img_width)
+                    img_file_type = self.get_image_file_type(raw_img_data)
+                    if self.is_image_file_type_supported(img_file_type):
+                        break
+                    else:
+                        self.save_image_to_file(event_id, self.get_fid(fid), raw_img_data, filetype=img_file_type)
+                if raw_img_data is not None and self.is_image_file_type_supported(img_file_type):
                     self.log("Successfully pulled Zoneminder image for event id:{} camera: {} msg: {} "
                              "frame type [{}]".format(event_id, camera, txt_body, entry))
                     break
-            if img_file_type is not None:
-                img_file_uri = self.save_image_to_file(event_id, fid, raw_img_data, filetype=img_file_type)
+                attempt += 1
+            if self.is_image_file_type_supported(img_file_type):
+                img_file_uri = self.save_image_to_file(event_id, self.get_fid(fid), raw_img_data, filetype=img_file_type)
                 if img_file_uri is not None:
                     for notifier in self.notify_list:
                         notify_path = 'notify/' + notifier

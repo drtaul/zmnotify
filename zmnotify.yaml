@@ -14,8 +14,38 @@ ZmNotify:
     - Motion
     - 'garage steps'
   sensors:
-    garage_alert_desc: 'input_boolean.garage_notify'
-    driveway_alert_desc: 'input_boolean.driveway_notify'
-    sidewalk_alert_desc: 'input_boolean.front_sidewalk_notify'
+    garage_alert_desc:
+      ha_gate: 'input_boolean.garage_notify'
+      zm_monitor:
+        name: Garage
+        function: Modect
+      zm_control:
+        allow: true
+        ratelimit:
+          window: 60
+          cnt: 2
+          reopen: 60
+    driveway_alert_desc:
+      ha_gate: 'input_boolean.driveway_notify'
+      zm_monitor:
+        name: Driveway
+        function: Nodect
+      zm_control:
+        allow: true
+        ratelimit:
+          window: 60
+          cnt: 2
+          reopen: 60
+    sidewalk_alert_desc:
+      ha_gate: 'input_boolean.front_sidewalk_notify'
+      zm_monitor:
+        name: 'Front Yard'
+        function: Nodect
+      zm_control:
+        allow: true
+        ratelimit:
+          window: 60
+          cnt: 2
+          reopen: 60
   notify:
     - !secret zm_notify_hangout
