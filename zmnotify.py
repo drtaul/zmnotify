@@ -27,11 +27,11 @@ def versiontuple(v):
 
 
 class Zmes(zmAPI.ZMApi):
-    '''
+    """
     Zoneminder Event Server Proxy
     This is a placeholder until the ZMApi class and pyzm helpers
     are extended to support the functions provided by this class.
-    '''
+    """
 
     def __init__(self, options={}):
         super(Zmes, self).__init__(options)
@@ -112,13 +112,14 @@ class Zmes(zmAPI.ZMApi):
         return rsp
 
 
-class ZmMonitor():
-    '''
+class ZmMonitor:
+    """
     Wrapper for Zoneminder Monitor object.
     This tracks the current state of the monitor e.g. Nodect, Modect, None etc.
     The user should specify what the enabled state should be e.g. Modect.
     Instances of this class are used to 'turn off' the camera when the associated notify gate is off.
-    '''
+    """
+
     def __init__(self, zmapi, mo, function, options, logger):
         self._zmapi = zmapi
         self._zm_monitor = mo
@@ -128,7 +129,7 @@ class ZmMonitor():
             self._settings[key] = options[key]
         self._settings['function'] = function
         self._zm_function = mo.function()
-        self.log("Monitor {} is reporting function {}".format(mo.name(), self._zm_function))
+        self.log("Monitor ({}) is reporting function {}".format(mo.name(), self._zm_function))
 
     def log(self, msg, *args, **kwargs):
         level = logging.INFO
@@ -153,10 +154,10 @@ class ZmMonitor():
 
     def set_function_state(self, function):
         if function != self._zm_function:
-            options = {}
-            options['function'] = function
+            options = {'function': function}
             self.log(
-                "ZM Monitor ({}) changing func from {} to {}".format(self._zm_monitor.name(), self._zm_function, function))
+                "ZM Monitor ({}) changing func from {} to {}".format(self._zm_monitor.name(), self._zm_function,
+                                                                     function))
             self._zm_monitor.set_parameter(options)
             self._zm_function = function
 
@@ -164,11 +165,12 @@ class ZmMonitor():
         self.set_function_state(self._settings['function'])
 
 
-class HASensor():
+class HASensor:
     """
     Home Assistant Sensor. This is a proxy for the sensor defined in Home Assistant for the
     Zoneminder monitor. This sensor should be a MQTT sensor.
     """
+
     def __init__(self, ad_parent, name, attributes, logger):
         self._ad = ad_parent
         self._name = name
@@ -186,9 +188,9 @@ class HASensor():
                 if zm_monitor is None:
                     self.log('Failed to find Zoneminder monitor: {}'.format(mname))
             elif key == 'zm_control':
-                self.log("Sensor {} adding control settings")
+                self.log("Sensor ({}) adding control settings".format(self.name))
                 self._cntrl_data = attributes[key]
-                self.log("Sensor {} allow: {}".format(self.name, self._cntrl_data["allow"]))
+                self.log("Sensor ({}) allow: {}".format(self.name, self._cntrl_data["allow"]))
             elif key == 'ha_gate':
                 self._gate = attributes[key]
         self._allow_monitor_control = True if self._cntrl_data['allow'] else False
@@ -336,7 +338,10 @@ class ZmEventNotifier(hass.Hass):
             self.img_frame_type = self.args["img_frame_type"]
             self.txt_blk_list = self.args["txt_blk_list"]
             for notify_id in self.args["notify"]:
-                self.notify_list.append(notify_id)
+                if notify_id is list:
+                    self.notify_list.extend(notify_id)
+                else:
+                    self.notify_list.append(notify_id)
             if not self.args["zmapi_use_token"]:
                 self.zm_options['token'] = False
         except KeyError:
@@ -475,7 +480,7 @@ class ZmEventNotifier(hass.Hass):
             attempt = 1
             for entry in ft_min_set:
                 self.log("Attempt #({}): pull image file with fid: {}".format(attempt, entry))
-                for retry in range(0,1):
+                for retry in range(0, 1):
                     raw_img_data = self.zm_api.get_event_image_data(event_id,
                                                                     fid=self.get_fid(entry), px_width=self.img_width)
                     img_file_type = self.get_image_file_type(raw_img_data)
@@ -489,7 +494,8 @@ class ZmEventNotifier(hass.Hass):
                     break
                 attempt += 1
             if self.is_image_file_type_supported(img_file_type):
-                img_file_uri = self.save_image_to_file(event_id, self.get_fid(fid), raw_img_data, filetype=img_file_type)
+                img_file_uri = self.save_image_to_file(event_id, self.get_fid(fid), raw_img_data,
+                                                       filetype=img_file_type)
                 if img_file_uri is not None:
                     for notifier in self.notify_list:
                         notify_path = 'notify/' + notifier

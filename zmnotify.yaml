@@ -48,4 +48,5 @@ ZmNotify:
           cnt: 2
           reopen: 300
   notify:
-    - !secret zm_notify_hangout
+    - !secret notify_hangouts_1
+    - !secret notify_hangouts_2
