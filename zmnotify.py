@@ -8,6 +8,7 @@ and then attaches a image frame for the Zoneminder Event Id.
 
 **NOTE:** This is a work in progress.
 '''
+import glob
 import os
 import traceback
 import appdaemon.plugins.hass.hassapi as hass
@@ -18,7 +19,7 @@ from io import open as iopen
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.1'
+__version__ = '0.2'
 
 
 def versiontuple(v):
@@ -141,7 +142,7 @@ class ZmMonitor():
         options = {}
         options['from'] = start_time
         event_list = self._zm_monitor.events(options).list()
-        self.log("ZM Monitor {} reporting {} events".format(self._zm_monitor.name(), len(event_list)))
+        self.log("ZM Monitor ({}) reporting {} events".format(self._zm_monitor.name(), len(event_list)))
         # return next((x for x in event_list if x.id() == event_id), None)
         rv = None
         for x in event_list:
@@ -155,7 +156,7 @@ class ZmMonitor():
             options = {}
             options['function'] = function
             self.log(
-                "Monitor {} change func from {} to {}".format(self._zm_monitor.name(), self._zm_function, function))
+                "ZM Monitor ({}) changing func from {} to {}".format(self._zm_monitor.name(), self._zm_function, function))
             self._zm_monitor.set_parameter(options)
             self._zm_function = function
 
@@ -164,16 +165,19 @@ class ZmMonitor():
 
 
 class HASensor():
-    '''
+    """
     Home Assistant Sensor. This is a proxy for the sensor defined in Home Assistant for the
     Zoneminder monitor. This sensor should be a MQTT sensor.
-    '''
+    """
     def __init__(self, ad_parent, name, attributes, logger):
         self._ad = ad_parent
         self._name = name
         self.logger = logger
         zm_monitor = None
-        zm_cntrl_data = None
+        self._cntrl_data = None
+        self._event_cnt = 0
+        self._window_timer = None
+        self._monitor_squelched = False
         for key, value in attributes.items():
             if key == 'zm_monitor':
                 mname = value['name']
@@ -182,20 +186,26 @@ class HASensor():
                 if zm_monitor is None:
                     self.log('Failed to find Zoneminder monitor: {}'.format(mname))
             elif key == 'zm_control':
-                zm_cntrl_data = attributes[key]
+                self.log("Sensor {} adding control settings")
+                self._cntrl_data = attributes[key]
+                self.log("Sensor {} allow: {}".format(self.name, self._cntrl_data["allow"]))
             elif key == 'ha_gate':
                 self._gate = attributes[key]
+        self._allow_monitor_control = True if self._cntrl_data['allow'] else False
+        for key, value in self._cntrl_data["ratelimit"].items():
+            if key == 'cnt':
+                self._cntrl_data["ratelimit"][key] = int(value)
 
         if zm_monitor is not None:
-            self._monitor = ZmMonitor(ad_parent.zm_api, zm_monitor, mfnc, zm_cntrl_data, logger)
+            self._monitor = ZmMonitor(ad_parent.zm_api, zm_monitor, mfnc, self._cntrl_data, logger)
         else:
             raise TypeError
 
         self._current_gate_state = self._ad.get_state(self._gate)
         self.log("{} is currently {}".format(self._gate, self._current_gate_state))
-        if self._current_gate_state == "off":
+        if self._allow_monitor_control and self._current_gate_state == "off":
             self._monitor.set_function_state('None')
-        elif self._current_gate_state == "on":
+        elif self._allow_monitor_control and self._current_gate_state == "on":
             self._monitor.enable_function()
 
         self._ad.listen_state(self.handle_state_change, self._gate)
@@ -218,6 +228,28 @@ class HASensor():
     def monitor_id(self):
         return self._monitor.id()
 
+    def squelched(self):
+        return self._monitor_squelched
+
+    def is_notify_enabled(self):
+        return self._current_gate_state == "on"
+
+    def reset_squelch(self):
+        self._event_cnt = 0
+        if self._window_timer is not None:
+            self._ad.cancel_timer(self._window_timer)
+        self._window_timer = None
+        if self._monitor_squelched:
+            self._monitor_squelched = False
+            self.log("Sensor {} squelch off".format(self.name))
+            self._ad.set_state(self._gate, state="on")
+
+    def set_squelch(self):
+        if self.is_notify_enabled() and self._window_timer is not None:
+            self.log("Sensor {} squelched at event cnt: {}".format(self.name, self._event_cnt))
+            self._ad.set_state(self._gate, state="off")
+            self._monitor_squelched = True
+
     def handle_state_change(self, entity, attribute, old, new, kwargs):
         """
         Callback hook called on input_boolean notify gate.
@@ -230,20 +262,38 @@ class HASensor():
         :param new: new/current state of off or on
         :param kwargs:
         """
-        self.log("Sensor state change reported on {} from {} to {}".format(self.name, old, new))
-        if new == "on":
-            self._monitor.enable_function()
-        elif new == "off":
-            self._monitor.set_function_state('None')
-        else:
-            self.log("ERROR: unexpected state change to {}".format(new))
+        self.log("Sensor notify gate state change reported on {} from {} to {}".format(self._gate, old, new))
+        if self._allow_monitor_control:
+            if new == "on":
+                self._monitor.enable_function()
+            elif new == "off":
+                self._monitor.set_function_state('None')
+                # if user manually turns off notify gate, then should clear squelch
+                # otherwise notify gate will be turned back on with timer expires
+                # self.reset_squelch()
+            else:
+                self.log("ERROR: unexpected state change to {}".format(new))
+        self._current_gate_state = new
+
+    def process_event(self):
+        self._event_cnt += 1
+        rt = self._cntrl_data["ratelimit"]
+        if self._window_timer is None:
+            self._window_timer = self._ad.run_in(self.handle_window_timer, rt["window"])
+        if self._event_cnt > rt['cnt']:
+            self.set_squelch()
+
+    def handle_window_timer(self, kwargs):
+        self._window_timer = None
+        self.log("Rate limit window timer expired on sensor {}".format(self.name))
+        self.reset_squelch()
 
 
 # noinspection PyAttributeOutsideInit
 class ZmEventNotifier(hass.Hass):
-    '''
+    """
     Appdaemon class.
-    '''
+    """
     zm_api: Zmes
     img_types = ['jpg', 'gif', 'png', 'tif', 'svg', 'jpeg']
     ts_fmt = '%a %I:%M %p'
@@ -264,6 +314,8 @@ class ZmEventNotifier(hass.Hass):
         self.img_width = 600
         self.img_cache_dir = '/tmp'
         self.zm_monitors = None
+        self.clean_files_in_local_cache()
+        self.cache_file_cnt = 0
 
     @staticmethod
     def version():
@@ -308,6 +360,15 @@ class ZmEventNotifier(hass.Hass):
         # at this point we should authenticated with zoneminder
         self.log('Zoneminder ES Handler init completed')
 
+    def clean_files_in_local_cache(self):
+        exp = os.path.join(self.img_cache_dir, "*.*")
+        file_list = glob.glob(exp)
+        for filePath in file_list:
+            try:
+                os.remove(filePath)
+            except:
+                pass
+
     def write_file_to_local_cache(self, img_data, filepath):
         """
         Save image data to specfied file
@@ -316,6 +377,7 @@ class ZmEventNotifier(hass.Hass):
         """
         with iopen(filepath, 'wb') as file:
             file.write(img_data.content)
+            self.cache_file_cnt += 1
 
     def gen_file_path(self, fname, ftype):
         filepath = os.path.join(self.img_cache_dir, fname + '.' + ftype)
@@ -387,7 +449,8 @@ class ZmEventNotifier(hass.Hass):
         :return: None
         """
         # is the notify gate on for the camera reporting object detection?
-        zm_sensor = self.sensors[entity]
+        zm_sensor: HASensor = self.sensors[entity]
+        zm_sensor.process_event()
         if self.get_state(zm_sensor.ha_gate) == 'on':
             self.log('processing state change for entity: {}'.format(entity))
             # gate is on, so proceed with notifications

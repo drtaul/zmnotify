@@ -7,7 +7,7 @@ ZmNotify:
   zm_user: !secret zm_user
   zm_pw: !secret zm_passwd
   img_width: 1200
-  img_cache_dir: '/config/www'
+  img_cache_dir: '/config/zm'
   img_frame_type: 'o'
   txt_blk_list:
     - Linked
@@ -22,9 +22,9 @@ ZmNotify:
       zm_control:
         allow: true
         ratelimit:
-          window: 60
+          window: 300
           cnt: 2
-          reopen: 60
+          reopen: 300
     driveway_alert_desc:
       ha_gate: 'input_boolean.driveway_notify'
       zm_monitor:
@@ -33,9 +33,9 @@ ZmNotify:
       zm_control:
         allow: true
         ratelimit:
-          window: 60
+          window: 300
           cnt: 2
-          reopen: 60
+          reopen: 300
     sidewalk_alert_desc:
       ha_gate: 'input_boolean.front_sidewalk_notify'
       zm_monitor:
@@ -44,8 +44,8 @@ ZmNotify:
       zm_control:
         allow: true
         ratelimit:
-          window: 60
+          window: 300
           cnt: 2
-          reopen: 60
+          reopen: 300
   notify:
     - !secret zm_notify_hangout
