@@ -15,101 +15,14 @@ import appdaemon.plugins.hass.hassapi as hass
 import pyzm.api as zmAPI
 import pyzm.helpers as zmtypes
 import requests
-from io import open as iopen
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.2'
+__version__ = '0.3'
 
 
 def versiontuple(v):
     return tuple(map(int, (v.split("."))))
-
-
-class Zmes(zmAPI.ZMApi):
-    """
-    Zoneminder Event Server Proxy
-    This is a placeholder until the ZMApi class and pyzm helpers
-    are extended to support the functions provided by this class.
-    """
-
-    def __init__(self, options={}):
-        super(Zmes, self).__init__(options)
-
-    def _make_binary_request(self, url=None, query={}, payload={}, req_type='get', reauth=True):
-        """
-    Issue http request and allow for binary/raw response data.
-    This is copy of the parent class _make_request method but returns a raw response.
-    :param url:
-    :param query:
-    :param payload:
-    :param req_type: one of ['get', 'post', 'put', 'delete']
-    :param reauth: True if authentication redo
-    :return: requests.response
-    """
-        req_type = req_type.lower()
-        if self._versiontuple(self.api_version) >= self._versiontuple('2.0'):
-            query['token'] = self.access_token
-            # ZM 1.34 API bug, will be fixed soon
-            self.session = requests.Session()
-        else:
-            # credentials is already query formatted
-            lurl = url.lower()
-            if lurl.endswith('json') or lurl.endswith('/'):
-                qchar = '?'
-            else:
-                qchar = '&'
-            url += qchar + self.legacy_credentials
-
-        try:
-            self.logger.Debug(1, 'make_request called with url={} payload={} type={} query={}'.format(url, payload,
-                                                                                                      req_type,
-                                                                                                      query))
-            if req_type == 'get':
-                r = self.session.get(url, params=query)
-            elif req_type == 'post':
-                r = self.session.post(url, data=payload, params=query)
-            elif req_type == 'put':
-                r = self.session.put(url, data=payload, params=query)
-            elif req_type == 'delete':
-                r = self.session.delete(url, data=payload, params=query)
-            else:
-                self.logger.Error('Unsupported request type:{}'.format(req_type))
-                raise ValueError('Unsupported request type:{}'.format(req_type))
-            r.raise_for_status()
-            return r
-        except requests.exceptions.HTTPError as err:
-            self.logger.Debug(1, 'Got API access error: {}'.format(err), 'error')
-            if err.response.status_code == 401 and reauth:
-                self.logger.Debug(1, 'Retrying login once')
-                self._relogin()
-                self.logger.Debug(1, 'Retrying failed request')
-                return self._make_binary_request(url, query, payload, req_type, reauth=False)
-            else:
-                raise err
-
-    def get_event_image_data(self, event_id, fid='alarm', px_width=600, query={},
-                             api_loc_suffix='/api',
-                             reauth=True):
-        """
-        Pull the event image file
-
-        :rtype: object
-        :param reauth: redo authentication if true
-        :param api_loc_suffix: api_url suffix that is appended to the base url
-        :param suffix_list: list of image types to pull
-        :param event: event object defining the notification event
-        :param fid: frame identifier, one of alarm, objectdetect, or integer frame number
-        :param px_width: scale image to this number of pixels
-        :param query: http request query options
-        """
-        # build url for the http get request to retrieve the image file
-        sfx_len = -len(api_loc_suffix)
-        img_url = self.api_url[0:sfx_len] + '/index.php?view=image&eid={}&fid={}&width={}'.format(event_id, fid,
-                                                                                                  px_width)
-        query['token'] = self.access_token
-        rsp = self._make_binary_request(img_url, query=query)
-        return rsp
 
 
 class ZmMonitor:
@@ -142,7 +55,14 @@ class ZmMonitor:
         evid = int(event_id)
         options = {}
         options['from'] = start_time
-        event_list = self._zm_monitor.events(options).list()
+        for retry in range(0,2):
+            try:
+                event_list = self._zm_monitor.events(options).list()
+                break
+            except requests.HTTPError:
+                self.error("Received HTTPError from Zoneminder server, retry: {}".format(retry))
+        if event_list is None:
+            return None
         self.log("ZM Monitor ({}) reporting {} events".format(self._zm_monitor.name(), len(event_list)))
         # return next((x for x in event_list if x.id() == event_id), None)
         rv = None
@@ -296,7 +216,7 @@ class ZmEventNotifier(hass.Hass):
     """
     Appdaemon class.
     """
-    zm_api: Zmes
+    zm_api: zmAPI.ZMApi
     img_types = ['jpg', 'gif', 'png', 'tif', 'svg', 'jpeg']
     ts_fmt = '%a %I:%M %p'
     log_header = 'ZM ES Handler'
@@ -306,6 +226,7 @@ class ZmEventNotifier(hass.Hass):
         self.notify_list = []
         self.zm_options = {
             'apiurl': None,
+            'portalurl': None,
             'user': None,
             'password': None,
             'logger': None,  # 'logger': None # use none if you don't want to log to ZM
@@ -331,6 +252,7 @@ class ZmEventNotifier(hass.Hass):
         self.init()
         try:
             self.zm_options['apiurl'] = self.args["zm_url"] + self.args["zmapi_loc"]
+            self.zm_options['portalurl'] = self.args["zm_url"]
             self.zm_options['user'] = self.args["zm_user"]
             self.zm_options['password'] = self.args["zm_pw"]
             self.img_width = self.args["img_width"]
@@ -349,8 +271,23 @@ class ZmEventNotifier(hass.Hass):
             raise
         # lets init the API
         if self.zm_api is None:
+            for retry in range(0,2):
+                try:
+                    self.zm_api = zmAPI.ZMApi(options=self.zm_options)
+                except requests.HTTPError:
+                    self.error("Encountered HTTPError, retrying, retry cnt: {}".format(retry))
+                if self.zm_api is not None:
+                    break
+            if self.zm_api is None:
+                self.error("Failed to connect to Zoneminder, aborting")
+                return
             try:
-                self.zm_api = Zmes(options=self.zm_options)
+                version_info = self.zm_api.version()
+                if version_info is not None and version_info['status'] == 'ok':
+                    self.log("Connected to Zoneminder server reporting version {}".format(version_info['zm_version']))
+                    self.log("API pyzm reporting version {}".format(version_info['api_version']))
+                else:
+                    self.error("Failed to retrieve version info for Zoneminder")
             except Exception as e:
                 self.error('Error: {}'.format(str(e)))
                 self.error(traceback.format_exc())
@@ -366,61 +303,15 @@ class ZmEventNotifier(hass.Hass):
         self.log('Zoneminder ES Handler init completed')
 
     def clean_files_in_local_cache(self):
-        exp = os.path.join(self.img_cache_dir, "*.*")
+        exp = os.path.join(self.img_cache_dir, "*[.jpeg,.jpg]")
         file_list = glob.glob(exp)
+        if len(file_list) > 0:
+            self.log("Cleaning cache dir: {} removing {} files ".format(self.img_cache_dir, len(file_list)))
         for filePath in file_list:
             try:
                 os.remove(filePath)
             except:
                 pass
-
-    def write_file_to_local_cache(self, img_data, filepath):
-        """
-        Save image data to specfied file
-        :param img_data: raw data from http get request
-        :param filepath: complete local file path
-        """
-        with iopen(filepath, 'wb') as file:
-            file.write(img_data.content)
-            self.cache_file_cnt += 1
-
-    def gen_file_path(self, fname, ftype):
-        filepath = os.path.join(self.img_cache_dir, fname + '.' + ftype)
-        cntr = 0
-        while os.path.exists(filepath):
-            nfilenam = '{}_{}'.format(fname, cntr)
-            filepath = os.path.join(self.img_cache_dir, nfilenam + '.' + ftype)
-            cntr += 1
-        return filepath
-
-    def get_image_file_type(self, img_data, suffix_list=img_types):
-        """
-        Check that the reported file type is something we know how to process
-        :param img_data: raw image data from http get request
-        :param suffix_list: list of supported file types
-        :return: string indicating filetype or None if not supported
-        """
-        if img_data is not None:
-            filetype = img_data.headers['Content-Type'].split('/')[1]
-            self.log("ZM ES Handler: img file type: {}".format(filetype))
-            return filetype
-        return None
-
-    def is_image_file_type_supported(self, filetype):
-        return filetype in self.img_types
-
-    def save_image_to_file(self, event_id, fid, img_data, filetype):
-        filename = '{}-ev{}'.format(fid, event_id)
-        filepath = self.gen_file_path(filename, filetype)
-        if self.is_image_file_type_supported(filetype):
-            self.log('Writing image file {}'.format(filepath))
-            self.write_file_to_local_cache(img_data, filepath)
-            return filepath
-        else:
-            self.error("{}: image filetype {} NOT SUPPORTED".format(self.log_header, filetype))
-            self.log('Writing invalid image file {}'.format(filepath))
-            self.write_file_to_local_cache(img_data, filepath)
-            return None
 
     def get_fid(self, frame_code):
         fid_map = {'a': "alarm",
@@ -466,47 +357,34 @@ class ZmEventNotifier(hass.Hass):
             txt_body = self.clean_text_msg(txt_body, self.txt_blk_list)
             msg_title = '{} Camera alert @{}\n'.format(camera, timestamp)
             fid = frame[1:]
-            zm_event = zm_sensor.monitor().find_event(event_id)
+            zm_event: zmtypes.Event = zm_sensor.monitor().find_event(event_id)
             if zm_event is not None:
                 self.log("found ZM Event ({}) for id {}".format(zm_event.name(), zm_event.id()))
             else:
-                self.error("failed to find ZM Event for id {}".format(event_id))
+                self.error("failed to find ZM Event for id {}, aborting".format(event_id))
+                return
             # attempt to pull the image based on the configured frame type
             # but if not available, pull the type indicated in the name/msg field
             ftl = [self.img_frame_type, fid]
             ft_min_set = [i for n, i in enumerate(ftl) if i not in ftl[:n]]
-            raw_img_data = None
-            img_file_type = None
+
             attempt = 1
             for entry in ft_min_set:
                 self.log("Attempt #({}): pull image file with fid: {}".format(attempt, entry))
-                for retry in range(0, 1):
-                    raw_img_data = self.zm_api.get_event_image_data(event_id,
-                                                                    fid=self.get_fid(entry), px_width=self.img_width)
-                    img_file_type = self.get_image_file_type(raw_img_data)
-                    if self.is_image_file_type_supported(img_file_type):
-                        break
-                    else:
-                        self.save_image_to_file(event_id, self.get_fid(fid), raw_img_data, filetype=img_file_type)
-                if raw_img_data is not None and self.is_image_file_type_supported(img_file_type):
-                    self.log("Successfully pulled Zoneminder image for event id:{} camera: {} msg: {} "
-                             "frame type [{}]".format(event_id, camera, txt_body, entry))
-                    break
-                attempt += 1
-            if self.is_image_file_type_supported(img_file_type):
-                img_file_uri = self.save_image_to_file(event_id, self.get_fid(fid), raw_img_data,
-                                                       filetype=img_file_type)
-                if img_file_uri is not None:
+                frame_type = self.get_fid(entry)
+                zm_event.download_image(fid=frame_type, dir=self.img_cache_dir)
+                img_filename = "{}-{}.jpg".format(zm_event.id(), frame_type)
+                img_file_uri = os.path.join(self.img_cache_dir, img_filename)
+                if os.path.exists(img_file_uri):
                     for notifier in self.notify_list:
                         notify_path = 'notify/' + notifier
                         self.log("ZM ES Handler: sending text to {} for event: {}".format(notify_path, event_id))
                         self.call_service(notify_path, message=txt_body, title=msg_title,
                                           data={'image_file': img_file_uri})
+                    break
                 else:
-                    self.log("ZM ES Handler: failed to save image file for event: {}".format(event_id))
-            else:
-                self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id, camera,
-                                                                                                     txt_body))
+                    self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id, camera, txt_body))
+                    attempt += 1
         else:
             self.log("ZM ES Handler: notify gate is turned off for entity: {}".format(entity))
         return
