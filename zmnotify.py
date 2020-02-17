@@ -18,7 +18,7 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3'
+__version__ = '0.3.1'
 
 
 def versiontuple(v):
@@ -60,7 +60,9 @@ class ZmMonitor:
                 event_list = self._zm_monitor.events(options).list()
                 break
             except requests.HTTPError:
-                self.error("Received HTTPError from Zoneminder server, retry: {}".format(retry))
+                self.log("Received HTTPError from Zoneminder server, retry: {}".format(retry))
+            except TypeError:
+                self.log("Received Type Error from Zoneminder API, retry: {}".format(retry))
         if event_list is None:
             return None
         self.log("ZM Monitor ({}) reporting {} events".format(self._zm_monitor.name(), len(event_list)))
@@ -237,7 +239,6 @@ class ZmEventNotifier(hass.Hass):
         self.img_width = 600
         self.img_cache_dir = '/tmp'
         self.zm_monitors = None
-        self.clean_files_in_local_cache()
         self.cache_file_cnt = 0
 
     @staticmethod
@@ -248,7 +249,7 @@ class ZmEventNotifier(hass.Hass):
         """
         initialize() function which will be called at startup and reload
         """
-        self.log('{} initializing'.format(self.log_header))
+        self.log('{} initializing version {}'.format(self.log_header, self.version()))
         self.init()
         try:
             self.zm_options['apiurl'] = self.args["zm_url"] + self.args["zmapi_loc"]
@@ -269,6 +270,7 @@ class ZmEventNotifier(hass.Hass):
         except KeyError:
             self.log("Missing arguments in yaml setup file")
             raise
+        self.clean_files_in_local_cache()
         # lets init the API
         if self.zm_api is None:
             for retry in range(0,2):
@@ -284,7 +286,8 @@ class ZmEventNotifier(hass.Hass):
             try:
                 version_info = self.zm_api.version()
                 if version_info is not None and version_info['status'] == 'ok':
-                    self.log("Connected to Zoneminder server reporting version {}".format(version_info['zm_version']))
+                    self.log("Connected to Zoneminder server reporting"
+			     " version {}".format(version_info['zm_version']))
                     self.log("API pyzm reporting version {}".format(version_info['api_version']))
                 else:
                     self.error("Failed to retrieve version info for Zoneminder")
@@ -303,7 +306,7 @@ class ZmEventNotifier(hass.Hass):
         self.log('Zoneminder ES Handler init completed')
 
     def clean_files_in_local_cache(self):
-        exp = os.path.join(self.img_cache_dir, "*[.jpeg,.jpg]")
+        exp = self.img_cache_dir + "/*[.jpeg,.jpg]"
         file_list = glob.glob(exp)
         if len(file_list) > 0:
             self.log("Cleaning cache dir: {} removing {} files ".format(self.img_cache_dir, len(file_list)))
@@ -383,7 +386,8 @@ class ZmEventNotifier(hass.Hass):
                                           data={'image_file': img_file_uri})
                     break
                 else:
-                    self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id, camera, txt_body))
+                    self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id,
+                                                                                                         camera, txt_body))
                     attempt += 1
         else:
             self.log("ZM ES Handler: notify gate is turned off for entity: {}".format(entity))
