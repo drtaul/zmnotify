@@ -16,3 +16,10 @@ The zmnotify.yaml file provides the configuration parameters
 for this app. This file is read by Appdaemon and passed to 
 this app via the initialize() method as defined by the Appdaemon
 API.
+
+
+Change log:
+  - 0.3.1  Stability/bug fixes
+  - 0.3.2  Monitor squelch no longer sets monitor function to None
+           Add support for different notification paths dependent
+           on occupied vs unoccupied.

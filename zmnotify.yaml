@@ -3,22 +3,33 @@ ZmNotify:
   class: ZmEventNotifier
   zm_url: !secret zm_url
   zmapi_loc: '/api'
+  # use token set to true is the recommended setting
+  # this allows pyzm to authenticate via token vs user/password, much faster/safer
   zmapi_use_token: true
   zm_user: !secret zm_user
   zm_pw: !secret zm_passwd
   img_width: 1200
   img_cache_dir: '/config/zm'
   img_frame_type: 'o'
+  # following is a black list of token's to be removed from the zoneminder notification text
   txt_blk_list:
     - Linked
     - Motion
     - 'garage steps'
+  # each sensor entry is id'd by the id defined in HA
   sensors:
     garage_alert_desc:
+      # this is a boolean to allow the HA user to turn off notifications for this camera/sensor
       ha_gate: 'input_boolean.garage_notify'
+      # identify the monitor name understood by zoneminder
+      # monitors will be disabled (state=None) whenever the ha_gate is set false
+      # function indicates what to set the monitor whenever ha_gate goes from false to true
       zm_monitor:
         name: Garage
         function: Modect
+      # give permission to this app to control this monitor i.e. set it to None
+      # rate limit defines the threshold in number of messages/window (time in seconds)
+      # reopen indicates how long to wait before removing the squelch on the monitor events
       zm_control:
         allow: true
         ratelimit:
@@ -47,6 +58,12 @@ ZmNotify:
           window: 300
           cnt: 2
           reopen: 300
-  notify:
+  occupied: 'input_boolean.home_occupied'
+  notify-occupied:
+    - !secret notify_tts_mp1
+    - !secret notify_tv1
+    - !secret notify_hangouts_1
+    - !secret notify_hangouts_2
+  notify-unoccupied:
     - !secret notify_hangouts_1
     - !secret notify_hangouts_2

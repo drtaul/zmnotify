@@ -18,7 +18,7 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'
 
 
 def versiontuple(v):
@@ -101,6 +101,8 @@ class HASensor:
         self._cntrl_data = None
         self._event_cnt = 0
         self._window_timer = None
+        # monitor_squelched indicates an active throttle is ongoing for this sensor
+        # squelching true stops the forwarding of notifications to HA notify service
         self._monitor_squelched = False
         for key, value in attributes.items():
             if key == 'zm_monitor':
@@ -114,6 +116,8 @@ class HASensor:
                 self._cntrl_data = attributes[key]
                 self.log("Sensor ({}) allow: {}".format(self.name, self._cntrl_data["allow"]))
             elif key == 'ha_gate':
+                # this is the boolean gate controlled by the user
+                # when true, the monitor function will be set to None if permission is given
                 self._gate = attributes[key]
         self._allow_monitor_control = True if self._cntrl_data['allow'] else False
         for key, value in self._cntrl_data["ratelimit"].items():
@@ -166,12 +170,12 @@ class HASensor:
         if self._monitor_squelched:
             self._monitor_squelched = False
             self.log("Sensor {} squelch off".format(self.name))
-            self._ad.set_state(self._gate, state="on")
+            # self._ad.set_state(self._gate, state="on")
 
     def set_squelch(self):
         if self.is_notify_enabled() and self._window_timer is not None:
             self.log("Sensor {} squelched at event cnt: {}".format(self.name, self._event_cnt))
-            self._ad.set_state(self._gate, state="off")
+            # self._ad.set_state(self._gate, state="off")
             self._monitor_squelched = True
 
     def handle_state_change(self, entity, attribute, old, new, kwargs):
@@ -225,7 +229,9 @@ class ZmEventNotifier(hass.Hass):
 
     def init(self):
         self._version = __version__
-        self.notify_list = []
+        self.notify_occup_list = []
+        self.notify_unoccup_list = []
+        self.occupied_state = False
         self.zm_options = {
             'apiurl': None,
             'portalurl': None,
@@ -260,11 +266,20 @@ class ZmEventNotifier(hass.Hass):
             self.img_cache_dir = self.args["img_cache_dir"]
             self.img_frame_type = self.args["img_frame_type"]
             self.txt_blk_list = self.args["txt_blk_list"]
-            for notify_id in self.args["notify"]:
+
+            for notify_id in self.args["notify-occupied"]:
                 if notify_id is list:
-                    self.notify_list.extend(notify_id)
+                    self.notify_occup_list.extend(notify_id)
                 else:
-                    self.notify_list.append(notify_id)
+                    self.notify_occup_list.append(notify_id)
+                    self.log("adding occupied notifier: {}".format(notify_id))
+            for notify_id in self.args["notify-unoccupied"]:
+                if notify_id is list:
+                    self.notify_unoccup_list.extend(notify_id)
+                else:
+                    self.notify_unoccup_list.append(notify_id)
+                    self.log("adding unoccupied notifier: {}".format(notify_id))
+
             if not self.args["zmapi_use_token"]:
                 self.zm_options['token'] = False
         except KeyError:
@@ -295,6 +310,11 @@ class ZmEventNotifier(hass.Hass):
                 self.error('Error: {}'.format(str(e)))
                 self.error(traceback.format_exc())
                 raise
+        occupied_bool = self.args["occupied"]
+        self.occupied_state = self.get_state(occupied_bool)
+        self.listen_state(self.handle_occupied_state_change, occupied_bool)
+        self.log("{} is currently {}".format(occupied_bool, self.occupied_state))
+
         # sensors is a dict of sensorid with associated notify gate
         for sensor in self.args["sensors"]:
             new_sensor = "sensor." + sensor
@@ -334,6 +354,10 @@ class ZmEventNotifier(hass.Hass):
             r_txt = r_txt.replace(item, '')
         return r_txt
 
+    def handle_occupied_state_change(self, entity, attribute, old, new, kwargs):
+        self.log('processing state change for entity: {}'.format(entity))
+        self.occupied_state = new
+
     def handle_state_change(self, entity, attribute, old, new, kwargs):
         """
         generate notifications for camera motion
@@ -349,46 +373,74 @@ class ZmEventNotifier(hass.Hass):
         """
         # is the notify gate on for the camera reporting object detection?
         zm_sensor: HASensor = self.sensors[entity]
-        zm_sensor.process_event()
+        if not zm_sensor.squelched():
+            zm_sensor.process_event()
+        if self.occupied_state:
+            notify_list = self.notify_occup_list
+        else:
+            notify_list = self.notify_unoccup_list
         if self.get_state(zm_sensor.ha_gate) == 'on':
-            self.log('processing state change for entity: {}'.format(entity))
-            # gate is on, so proceed with notifications
-            timestamp = dt.now().strftime(self.__class__.ts_fmt)
-            camera, detail = new.split(':(')
-            event_id, sub_detail = detail.split(') ')
-            frame, txt_body = sub_detail.split('] ')
-            txt_body = self.clean_text_msg(txt_body, self.txt_blk_list)
-            msg_title = '{} Camera alert @{}\n'.format(camera, timestamp)
-            fid = frame[1:]
-            zm_event: zmtypes.Event = zm_sensor.monitor().find_event(event_id)
-            if zm_event is not None:
-                self.log("found ZM Event ({}) for id {}".format(zm_event.name(), zm_event.id()))
-            else:
-                self.error("failed to find ZM Event for id {}, aborting".format(event_id))
-                return
-            # attempt to pull the image based on the configured frame type
-            # but if not available, pull the type indicated in the name/msg field
-            ftl = [self.img_frame_type, fid]
-            ft_min_set = [i for n, i in enumerate(ftl) if i not in ftl[:n]]
-
-            attempt = 1
-            for entry in ft_min_set:
-                self.log("Attempt #({}): pull image file with fid: {}".format(attempt, entry))
-                frame_type = self.get_fid(entry)
-                zm_event.download_image(fid=frame_type, dir=self.img_cache_dir)
-                img_filename = "{}-{}.jpg".format(zm_event.id(), frame_type)
-                img_file_uri = os.path.join(self.img_cache_dir, img_filename)
-                if os.path.exists(img_file_uri):
-                    for notifier in self.notify_list:
-                        notify_path = 'notify/' + notifier
-                        self.log("ZM ES Handler: sending text to {} for event: {}".format(notify_path, event_id))
-                        self.call_service(notify_path, message=txt_body, title=msg_title,
-                                          data={'image_file': img_file_uri})
-                    break
+            if not zm_sensor.squelched():
+                self.log('processing state change for entity: {}'.format(entity))
+                # gate is on, so proceed with notifications
+                timestamp = dt.now().strftime(self.__class__.ts_fmt)
+                camera, detail = new.split(':(')
+                event_id, sub_detail = detail.split(') ')
+                frame, txt_body = sub_detail.split('] ')
+                txt_body = self.clean_text_msg(txt_body, self.txt_blk_list)
+                msg_title = '{} Camera alert @{}\n'.format(camera, timestamp)
+                fid = frame[1:]
+                zm_event: zmtypes.Event = zm_sensor.monitor().find_event(event_id)
+                if zm_event is not None:
+                    self.log("found ZM Event ({}) for id {}".format(zm_event.name(), zm_event.id()))
                 else:
-                    self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id,
-                                                                                                         camera, txt_body))
-                    attempt += 1
+                    self.error("failed to find ZM Event for id {}, aborting".format(event_id))
+                    return
+                # attempt to pull the image based on the configured frame type
+                # but if not available, pull the type indicated in the name/msg field
+                ftl = [self.img_frame_type, fid]
+                ft_min_set = [i for n, i in enumerate(ftl) if i not in ftl[:n]]
+
+                attempt = 1
+                for entry in ft_min_set:
+                    self.log("Attempt #({}): pull image file with fid: {}".format(attempt, entry))
+                    frame_type = self.get_fid(entry)
+                    zm_event.download_image(fid=frame_type, dir=self.img_cache_dir)
+                    img_filename = "{}-{}.jpg".format(zm_event.id(), frame_type)
+                    img_file_uri = os.path.join(self.img_cache_dir, img_filename)
+                    if os.path.exists(img_file_uri):
+                        for notifier in notify_list:
+                            nlist = notifier.split(',')
+                            notify_path = nlist[0]
+                            notify_entity = None
+                            if len(nlist) > 1:
+                                notify_entity = nlist[1]
+                            if notify_path.startswith('notify/'):
+                                self.log("ZM ES Handler: sending text to {} for event: {}".format(notify_path, event_id))
+                                # currently relying on a hint embedded in the name of the notify path
+                                if "hangout" in notify_path:
+                                    self.call_service(notify_path, message=txt_body, title=msg_title,
+                                                      data={'image_file': img_file_uri})
+                                else:
+                                    # fall through to here with a simple call to send text with an image
+                                    # need to explore if these entities can be queried on type to descriminate how to
+                                    # make the service call
+                                    msg_txt = msg_title + txt_body
+                                    self.call_service(notify_path, message=msg_txt)
+                            elif notify_path.startswith('tts/') and notify_entity is not None:
+                                self.log("ZM ES Handler: announcing text via tts to {} for event: {}".format(notify_entity, event_id))
+                                info_txt = txt_body.split(':')
+                                announce_text = "{} camera {}".format(camera, " ".join(info_txt))
+                                self.call_service(notify_path, entity_id=notify_entity, message=announce_text)
+                            else:
+                                self.log("Dropping notification to {}".format(notify_path))
+                        break
+                    else:
+                        self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id,
+                                                                                                             camera, txt_body))
+                        attempt += 1
+            else:
+                self.log("ZM ES Handler: squelch active for entity: {}".format(entity))
         else:
             self.log("ZM ES Handler: notify gate is turned off for entity: {}".format(entity))
         return
