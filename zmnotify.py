@@ -18,15 +18,41 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3.3'
+__version__ = '0.3.4'
 
 
 def versiontuple(v):
     return tuple(map(int, (v.split("."))))
 
+class ZmLogger:
+    """
+    The pyzm module uses a non-standard logging API. It also defaults to debug level. This is a simple
+    wrapper class to bridge between the pyzm logging such that log level is adhered to.
+    """
+
+    def __init__(self, logger):
+        self.logger = logger
+
+    def Debug (self, level, message, caller=None):
+        self.logger.log(logging.DEBUG, message)
+
+    def Info (self,message, caller=None):
+        self.logger.log(logging.INFO, message)
+
+    def Error (self,message, caller=None):
+        self.logger.log(logging.ERROR, message)
+
+    def Fatal (self,message, caller=None):
+        self.logger.log(logging.FATAL, message)
+
+    def Panic (self,message, caller=None):
+        self.logger.log(logging.FATAL, message)
+
+
 
 class ZmMonitor:
     AUDIT_TIMEOUT = 60
+
     """
     Wrapper for Zoneminder Monitor object.
     This tracks the current state of the monitor e.g. Nodect, Modect, None etc.
@@ -260,12 +286,14 @@ class ZmEventNotifier(hass.Hass):
     img_types = ['jpg', 'gif', 'png', 'tif', 'svg', 'jpeg']
     ts_fmt = '%a %I:%M %p'
     log_header = 'ZM ES Handler'
+    CLEANUP_INTERVAL = 24*60*60
 
     def init(self):
         self._version = __version__
         self.notify_occup_list = []
         self.notify_unoccup_list = []
         self.occupied_state = False
+        self.notify_list = self.notify_unoccup_list
         self.zm_options = {
             'apiurl': None,
             'portalurl': None,
@@ -280,6 +308,7 @@ class ZmEventNotifier(hass.Hass):
         self.img_cache_dir = '/tmp'
         self.zm_monitors = None
         self.cache_file_cnt = 0
+        self.last_cleanup = dt.now()
 
     @staticmethod
     def version():
@@ -296,6 +325,7 @@ class ZmEventNotifier(hass.Hass):
             self.zm_options['portalurl'] = self.args["zm_url"]
             self.zm_options['user'] = self.args["zm_user"]
             self.zm_options['password'] = self.args["zm_pw"]
+            self.zm_options['logger'] = ZmLogger(self.logger)
             self.img_width = self.args["img_width"]
             self.img_cache_dir = self.args["img_cache_dir"]
             self.img_frame_type = self.args["img_frame_type"]
@@ -320,7 +350,6 @@ class ZmEventNotifier(hass.Hass):
             self.log("Missing arguments in yaml setup file")
             raise
         self.clean_files_in_local_cache()
-        # lets init the API
         if self.zm_api is None:
             for retry in range(0, 2):
                 try:
@@ -362,13 +391,20 @@ class ZmEventNotifier(hass.Hass):
     def clean_files_in_local_cache(self):
         exp = self.img_cache_dir + "/*[.jpeg,.jpg]"
         file_list = glob.glob(exp)
+        delete_cnt = 0
         if len(file_list) > 0:
             self.log("Cleaning cache dir: {} removing {} files ".format(self.img_cache_dir, len(file_list)))
         for filePath in file_list:
-            try:
-                os.remove(filePath)
-            except:
-                pass
+            fdelta = dt.now() - dt.fromtimestamp(os.stat(filePath).st_mtime)
+            age_of_file_in_secs = fdelta.total_seconds()
+            if age_of_file_in_secs > 30:
+                try:
+                    os.remove(filePath)
+                    delete_cnt += 1
+                except:
+                    pass
+        self.last_cleanup = dt.now()
+        return delete_cnt
 
     def get_fid(self, frame_code):
         fid_map = {'a': "alarm",
@@ -389,8 +425,16 @@ class ZmEventNotifier(hass.Hass):
         return r_txt
 
     def handle_occupied_state_change(self, entity, attribute, old, new, kwargs):
-        self.log('processing state change for entity: {}'.format(entity))
-        self.occupied_state = new
+        self.log('processing state change for entity: {} to state {}'.format(entity, new))
+        if new == "on":
+            occupied = True
+        else:
+            occupied = False
+        self.occupied_state = occupied
+        if occupied:
+            self.notify_list = self.notify_occup_list
+        else:
+            self.notify_list = self.notify_unoccup_list
 
     def handle_state_change(self, entity, attribute, old, new, kwargs):
         """
@@ -409,10 +453,7 @@ class ZmEventNotifier(hass.Hass):
         zm_sensor: HASensor = self.sensors[entity]
         if not zm_sensor.squelched():
             zm_sensor.process_event()
-        if self.occupied_state:
-            notify_list = self.notify_occup_list
-        else:
-            notify_list = self.notify_unoccup_list
+
         if self.get_state(zm_sensor.ha_gate) == 'on':
             if not zm_sensor.squelched():
                 self.log('processing state change for entity: {}'.format(entity))
@@ -442,8 +483,9 @@ class ZmEventNotifier(hass.Hass):
                     zm_event.download_image(fid=frame_type, dir=self.img_cache_dir)
                     img_filename = "{}-{}.jpg".format(zm_event.id(), frame_type)
                     img_file_uri = os.path.join(self.img_cache_dir, img_filename)
+                    self.cache_file_cnt += 1
                     if os.path.exists(img_file_uri):
-                        for notifier in notify_list:
+                        for notifier in self.notify_list:
                             nlist = notifier.split(',')
                             notify_path = nlist[0]
                             notify_entity = None
@@ -480,6 +522,9 @@ class ZmEventNotifier(hass.Hass):
                                                                                                              camera,
                                                                                                              txt_body))
                         attempt += 1
+                cleanup_delta = dt.now() - self.last_cleanup
+                if cleanup_delta.total_seconds() >= self.CLEANUP_INTERVAL:
+                    self.cache_file_cnt -= self.clean_files_in_local_cache()
             else:
                 self.log("ZM ES Handler: squelch active for entity: {}".format(entity))
         else:
