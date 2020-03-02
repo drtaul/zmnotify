@@ -9,7 +9,6 @@ and then attaches a image frame for the Zoneminder Event Id.
 **NOTE:** This is a work in progress.
 '''
 import glob
-import json
 import os
 import traceback
 import appdaemon.plugins.hass.hassapi as hass
@@ -66,7 +65,7 @@ class ZmMonitor:
         evid = int(event_id)
         options = {}
         options['from'] = start_time
-        for retry in range(0,2):
+        for retry in range(0, 2):
             try:
                 event_list = self._zm_monitor.events(options).list()
                 break
@@ -111,7 +110,7 @@ class ZmMonitor:
         Consequently, we will assume that 'not running' is equivalent to function mode set to None.
         :return:
         """
-        status = self._zm_monitor.status() # query running status of monitor
+        status = self._zm_monitor.status()  # query running status of monitor
         is_running = status['status']
         # self.log("Audit state of monitor {}, zm reports state: {}".format(self.name, status['statustext']))
         if not is_running and self._zm_function != 'None':
@@ -119,6 +118,7 @@ class ZmMonitor:
                      "set ZM camera {} to {}".format(self.name, self._zm_function))
             self.set_zoneminder_state(self._zm_function)
         self._audit_timer = self._ad.run_in(self.audit_monitor_state, self.AUDIT_TIMEOUT)
+
 
 class HASensor:
     """
@@ -137,6 +137,7 @@ class HASensor:
         # monitor_squelched indicates an active throttle is ongoing for this sensor
         # squelching true stops the forwarding of notifications to HA notify service
         self._monitor_squelched = False
+        mfnc = 'None'
         for key, value in attributes.items():
             if key == 'zm_monitor':
                 mname = value['name']
@@ -321,7 +322,7 @@ class ZmEventNotifier(hass.Hass):
         self.clean_files_in_local_cache()
         # lets init the API
         if self.zm_api is None:
-            for retry in range(0,2):
+            for retry in range(0, 2):
                 try:
                     self.zm_api = zmAPI.ZMApi(options=self.zm_options)
                 except requests.HTTPError:
@@ -335,7 +336,7 @@ class ZmEventNotifier(hass.Hass):
                 version_info = self.zm_api.version()
                 if version_info is not None and version_info['status'] == 'ok':
                     self.log("Connected to Zoneminder server reporting"
-			     " version {}".format(version_info['zm_version']))
+                             " version {}".format(version_info['zm_version']))
                     self.log("API pyzm reporting version {}".format(version_info['api_version']))
                 else:
                     self.error("Failed to retrieve version info for Zoneminder")
@@ -448,29 +449,36 @@ class ZmEventNotifier(hass.Hass):
                             notify_entity = None
                             if len(nlist) > 1:
                                 notify_entity = nlist[1]
-                            if notify_path.startswith('notify/'):
-                                self.log("ZM ES Handler: sending text to {} for event: {}".format(notify_path, event_id))
-                                # currently relying on a hint embedded in the name of the notify path
-                                if "hangout" in notify_path:
-                                    self.call_service(notify_path, message=txt_body, title=msg_title,
-                                                      data={'image_file': img_file_uri})
+                            try:
+                                if notify_path.startswith('notify/'):
+                                    self.log(
+                                        "ZM ES Handler: sending text to {} for event: {}".format(notify_path, event_id))
+                                    # currently relying on a hint embedded in the name of the notify path
+                                    if "hangout" in notify_path:
+                                        self.call_service(notify_path, message=txt_body, title=msg_title,
+                                                          data={'image_file': img_file_uri})
+                                    else:
+                                        # fall through to here with a simple call to send text with an image
+                                        # need to explore if these entities can be queried on type to descriminate
+                                        # how to make the service call
+                                        msg_txt = msg_title + txt_body
+                                        self.call_service(notify_path, message=msg_txt)
+                                elif notify_path.startswith('tts/') and notify_entity is not None:
+                                    self.log("ZM ES Handler: announcing text via tts to {} for event: {}".format(
+                                        notify_entity, event_id))
+                                    info_txt = txt_body.split(':')
+                                    announce_text = "{} camera {}".format(camera, " ".join(info_txt))
+                                    self.call_service(notify_path, entity_id=notify_entity, message=announce_text)
                                 else:
-                                    # fall through to here with a simple call to send text with an image
-                                    # need to explore if these entities can be queried on type to descriminate how to
-                                    # make the service call
-                                    msg_txt = msg_title + txt_body
-                                    self.call_service(notify_path, message=msg_txt)
-                            elif notify_path.startswith('tts/') and notify_entity is not None:
-                                self.log("ZM ES Handler: announcing text via tts to {} for event: {}".format(notify_entity, event_id))
-                                info_txt = txt_body.split(':')
-                                announce_text = "{} camera {}".format(camera, " ".join(info_txt))
-                                self.call_service(notify_path, entity_id=notify_entity, message=announce_text)
-                            else:
-                                self.log("Dropping notification to {}".format(notify_path))
+                                    self.log("Dropping notification to {}".format(notify_path))
+                            except:
+                                self.log("Exception encountered on calling entity {}".format(notify_path))
+                                pass
                         break
                     else:
                         self.log("Failed to pull Zoneminder image for event id:{} camera: {} msg: {}".format(event_id,
-                                                                                                             camera, txt_body))
+                                                                                                             camera,
+                                                                                                             txt_body))
                         attempt += 1
             else:
                 self.log("ZM ES Handler: squelch active for entity: {}".format(entity))
