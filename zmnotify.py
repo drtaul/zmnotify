@@ -9,6 +9,7 @@ and then attaches a image frame for the Zoneminder Event Id.
 **NOTE:** This is a work in progress.
 '''
 import glob
+import json
 import os
 import traceback
 import appdaemon.plugins.hass.hassapi as hass
@@ -18,7 +19,7 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3.2'
+__version__ = '0.3.3'
 
 
 def versiontuple(v):
@@ -26,6 +27,7 @@ def versiontuple(v):
 
 
 class ZmMonitor:
+    AUDIT_TIMEOUT = 60
     """
     Wrapper for Zoneminder Monitor object.
     This tracks the current state of the monitor e.g. Nodect, Modect, None etc.
@@ -33,23 +35,32 @@ class ZmMonitor:
     Instances of this class are used to 'turn off' the camera when the associated notify gate is off.
     """
 
-    def __init__(self, zmapi, mo, function, options, logger):
-        self._zmapi = zmapi
+    def __init__(self, ad_parent, mo, function, options, logger):
+        self._zmapi = ad_parent.zm_api
+        self._ad = ad_parent
         self._zm_monitor = mo
         self._settings = {}
         self.logger = logger
         for key, value in options.items():
             self._settings[key] = options[key]
         self._settings['function'] = function
+        # get the current state according to zoneminder
         self._zm_function = mo.function()
         self.log("Monitor ({}) is reporting function {}".format(mo.name(), self._zm_function))
+        # audit state every 2 minutes
+        self._audit_timer = self._ad.run_in(self.audit_monitor_state, self.AUDIT_TIMEOUT)
 
     def log(self, msg, *args, **kwargs):
         level = logging.INFO
         self.logger.log(level, msg, *args, **kwargs)
 
+    @property
     def id(self):
         return self._zm_monitor.id()
+
+    @property
+    def name(self):
+        return self._zm_monitor.name()
 
     def find_event(self, event_id, start_time='1 hour ago'):
         evid = int(event_id)
@@ -74,18 +85,40 @@ class ZmMonitor:
                 break
         return rv
 
+    def set_zoneminder_state(self, function):
+        options = {'function': function}
+        self.log("Monitor {}: sending zoneminder request to set function state to: {}".format(self.name, function))
+        self._zm_monitor.set_parameter(options)
+
     def set_function_state(self, function):
         if function != self._zm_function:
-            options = {'function': function}
             self.log(
                 "ZM Monitor ({}) changing func from {} to {}".format(self._zm_monitor.name(), self._zm_function,
                                                                      function))
-            self._zm_monitor.set_parameter(options)
+            self.set_zoneminder_state(function)
             self._zm_function = function
 
     def enable_function(self):
         self.set_function_state(self._settings['function'])
 
+    def audit_monitor_state(self, kwargs):
+        """
+        Check that zoneminder reported state matches our state
+        If there is a mismatch, force zoneminder to our set state.
+        We are limited here given the current pyzm monitor proxy caches the state of the monitor-function,
+        the assumption on the part of pyzm is there will never be a need to query to the real current running
+        state of the monitor other than the status() which only reports whether if the monitor is actively running.
+        Consequently, we will assume that 'not running' is equivalent to function mode set to None.
+        :return:
+        """
+        status = self._zm_monitor.status() # query running status of monitor
+        is_running = status['status']
+        # self.log("Audit state of monitor {}, zm reports state: {}".format(self.name, status['statustext']))
+        if not is_running and self._zm_function != 'None':
+            self.log("Monitor state mismatch detected by audit, "
+                     "set ZM camera {} to {}".format(self.name, self._zm_function))
+            self.set_zoneminder_state(self._zm_function)
+        self._audit_timer = self._ad.run_in(self.audit_monitor_state, self.AUDIT_TIMEOUT)
 
 class HASensor:
     """
@@ -125,7 +158,7 @@ class HASensor:
                 self._cntrl_data["ratelimit"][key] = int(value)
 
         if zm_monitor is not None:
-            self._monitor = ZmMonitor(ad_parent.zm_api, zm_monitor, mfnc, self._cntrl_data, logger)
+            self._monitor = ZmMonitor(ad_parent, zm_monitor, mfnc, self._cntrl_data, logger)
         else:
             raise TypeError
 

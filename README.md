@@ -23,3 +23,5 @@ Change log:
   - 0.3.2  Monitor squelch no longer sets monitor function to None
            Add support for different notification paths dependent
            on occupied vs unoccupied.
+  - 0.3.3  Add periodic audit to check zoneminder and zmnotify monitor
+           are in sync
