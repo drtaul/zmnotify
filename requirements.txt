@@ -1,3 +1,4 @@
 pyzm
 requests
 appdaemon
+linux-headers
