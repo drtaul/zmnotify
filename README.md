@@ -127,8 +127,25 @@ Example zmnotify.yaml
         - !secret notify_hangouts_1
         - !secret notify_hangouts_2
 
+## AppDaemon configuration
+The zmnotify app requires the pyzm package. In turn, pyzm has several complex dependencies that may require 
+pulling python packages and compiling the associated C/C++ code. The following lists the AppDaemon configuration
+the author uses to trigger proper installation of pyzm into the AppDaemon Docker container.
+
+	system_packages:
+	  - python3-dev
+	  - gcc
+	  - libc-dev
+	  - linux-headers
+	python_packages:
+		- pyzm
+	init_commands: []
+
+
 
 Change log:
+  - 0.3.6  bug fix relating to initial setup of occupied vs unoccupied.
+           tested with pyzm verion 0.1.14
   - 0.3.1  Stability/bug fixes
   - 0.3.2  Monitor squelch no longer sets monitor function to None
            Add support for different notification paths dependent
