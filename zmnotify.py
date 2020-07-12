@@ -18,7 +18,7 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3.4'
+__version__ = '0.3.5'
 
 
 def versiontuple(v):
@@ -136,7 +136,14 @@ class ZmMonitor:
         Consequently, we will assume that 'not running' is equivalent to function mode set to None.
         :return:
         """
-        status = self._zm_monitor.status()  # query running status of monitor
+        status = None
+        for retry in range(0, 1):
+            try:
+                status = self._zm_monitor.status()  # query running status of monitor
+            except requests.exceptions.HTTPError as err:
+                self.log("Audit monitor status request failed")
+        if status is None:
+            return
         is_running = status['status']
         # self.log("Audit state of monitor {}, zm reports state: {}".format(self.name, status['statustext']))
         if not is_running and self._zm_function != 'None':
@@ -376,6 +383,8 @@ class ZmEventNotifier(hass.Hass):
         occupied_bool = self.args["occupied"]
         self.occupied_state = self.get_state(occupied_bool)
         self.listen_state(self.handle_occupied_state_change, occupied_bool)
+        if self.occupied_state == 'on':
+            self.notify_list = self.notify_occup_list
         self.log("{} is currently {}".format(occupied_bool, self.occupied_state))
 
         # sensors is a dict of sensorid with associated notify gate
@@ -433,8 +442,11 @@ class ZmEventNotifier(hass.Hass):
         self.occupied_state = occupied
         if occupied:
             self.notify_list = self.notify_occup_list
+            self.log("Setting to {} notify list, len={}".format("occupied", len(self.notify_list)))
         else:
             self.notify_list = self.notify_unoccup_list
+            self.log("Setting to {} notify list, len={}".format("unoccupied", len(self.notify_list)))
+
 
     def handle_state_change(self, entity, attribute, old, new, kwargs):
         """
