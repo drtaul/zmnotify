@@ -377,6 +377,9 @@ class ZmEventNotifier(hass.Hass):
         self.occupied_state = self.get_state(occupied_bool)
         self.listen_state(self.handle_occupied_state_change, occupied_bool)
         self.log("{} is currently {}".format(occupied_bool, self.occupied_state))
+        if self.occupied_state == 'on':
+           self.notify_list = self.notify_occup_list
+           self.occupied_state = True
 
         # sensors is a dict of sensorid with associated notify gate
         for sensor in self.args["sensors"]:
