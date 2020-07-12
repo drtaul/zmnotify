@@ -18,7 +18,7 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3.5'
+__version__ = '0.3.6'
 
 
 def versiontuple(v):
@@ -381,14 +381,11 @@ class ZmEventNotifier(hass.Hass):
                 self.error(traceback.format_exc())
                 raise
         occupied_bool = self.args["occupied"]
-        self.occupied_state = self.get_state(occupied_bool)
+        self.occupied_state = True if self.get_state(occupied_bool) == 'on' else False
         self.listen_state(self.handle_occupied_state_change, occupied_bool)
-        if self.occupied_state == 'on':
+        if self.occupied_state:
             self.notify_list = self.notify_occup_list
-        self.log("{} is currently {}".format(occupied_bool, self.occupied_state))
-        if self.occupied_state == 'on':
-           self.notify_list = self.notify_occup_list
-           self.occupied_state = True
+            self.log("Setting to {} notify list, len={}".format("occupied", len(self.notify_list)))
 
         # sensors is a dict of sensorid with associated notify gate
         for sensor in self.args["sensors"]:
