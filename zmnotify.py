@@ -18,7 +18,7 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3.6'
+__version__ = '0.3.7'
 
 
 def versiontuple(v):
@@ -142,6 +142,8 @@ class ZmMonitor:
                 status = self._zm_monitor.status()  # query running status of monitor
             except requests.exceptions.HTTPError as err:
                 self.log("Audit monitor status request failed")
+            except TypeError as err:
+                self.log("Audit monitor status request failed likely to expired token?")
         if status is None:
             return
         is_running = status['status']
@@ -150,6 +152,8 @@ class ZmMonitor:
             self.log("Monitor state mismatch detected by audit, "
                      "set ZM camera {} to {}".format(self.name, self._zm_function))
             self.set_zoneminder_state(self._zm_function)
+        else:
+            self.log("Monitor ZM Camera {} audit passed: {}".format(self.name, self._zm_function))
         self._audit_timer = self._ad.run_in(self.audit_monitor_state, self.AUDIT_TIMEOUT)
 
 
