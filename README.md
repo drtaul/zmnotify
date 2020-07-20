@@ -41,6 +41,20 @@ use case includes announcing the text on the local google smart speaker if the h
 **NOTE:** This is a work in progress. Testing is only done with the authors setup. The Zoneminder facility and
 Home Assistant are all running in docker containers on the same UNRAID server.
 
+## Management Features
+
+* **Monitor an HA defined sensor** to indicate whether the home is currently occupied. This
+  allows zmnotify to generate a different set of notifications depending on this
+  condition. For example, if occupied, announce over the various in home speakers vs
+  sending a text notification.
+  
+* **Allow user to define a boolean variable** (within HA) to act as a gate to enable or disable 
+  each monitor. This simplifies alarm mode automations as well as simple enable/disable 
+  depending on whether there is an outside activity triggering repeated security alerts.
+  
+* **Performs a periodic audit** on the state of each monitor to ensure the Zoneminder system has not changed the 
+  configured setting.
+
 ## ZMNotify Configuration
 The zmnotify.yaml file provides the configuration parameters
 for this app. This file is read by Appdaemon and passed to 
@@ -144,6 +158,8 @@ the author uses to trigger proper installation of pyzm into the AppDaemon Docker
 
 
 Change log:
+  - 0.3.8  added handling for exception in monitor audit where auth token
+           expired
   - 0.3.6  bug fix relating to initial setup of occupied vs unoccupied.
            tested with pyzm verion 0.1.14
   - 0.3.1  Stability/bug fixes

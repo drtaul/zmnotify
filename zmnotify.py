@@ -18,7 +18,7 @@ import requests
 from datetime import datetime as dt
 import logging
 
-__version__ = '0.3.7'
+__version__ = '0.3.8'
 
 
 def versiontuple(v):
@@ -51,7 +51,7 @@ class ZmLogger:
 
 
 class ZmMonitor:
-    AUDIT_TIMEOUT = 60
+    AUDIT_TIMEOUT = 2 * 60
 
     """
     Wrapper for Zoneminder Monitor object.
@@ -66,6 +66,7 @@ class ZmMonitor:
         self._zm_monitor = mo
         self._settings = {}
         self.logger = logger
+        self.last_audit_failed = False
         for key, value in options.items():
             self._settings[key] = options[key]
         self._settings['function'] = function
@@ -101,7 +102,7 @@ class ZmMonitor:
                 self.log("Received Type Error from Zoneminder API, retry: {}".format(retry))
         if event_list is None:
             return None
-        self.log("ZM Monitor ({}) reporting {} events".format(self._zm_monitor.name(), len(event_list)))
+        self.log("ZM Monitor ({}) reporting {} events".format(self.name, len(event_list)))
         # return next((x for x in event_list if x.id() == event_id), None)
         rv = None
         for x in event_list:
@@ -137,24 +138,27 @@ class ZmMonitor:
         :return:
         """
         status = None
+        # make sure to start timer for next audit cycle
+        self._audit_timer = self._ad.run_in(self.audit_monitor_state, self.AUDIT_TIMEOUT)
         for retry in range(0, 1):
             try:
                 status = self._zm_monitor.status()  # query running status of monitor
             except requests.exceptions.HTTPError as err:
-                self.log("Audit monitor status request failed")
+                self.log("Audit monitor ({}) status request failed".format(self.name))
             except TypeError as err:
-                self.log("Audit monitor status request failed likely to expired token?")
+                self.log("Audit monitor ({})status request failed likely to expired token?".format(self.name))
         if status is None:
             return
         is_running = status['status']
         # self.log("Audit state of monitor {}, zm reports state: {}".format(self.name, status['statustext']))
         if not is_running and self._zm_function != 'None':
+            self.last_audit_failed = True
             self.log("Monitor state mismatch detected by audit, "
                      "set ZM camera {} to {}".format(self.name, self._zm_function))
             self.set_zoneminder_state(self._zm_function)
-        else:
+        elif self.last_audit_failed:
+            self.last_audit_failed = False
             self.log("Monitor ZM Camera {} audit passed: {}".format(self.name, self._zm_function))
-        self._audit_timer = self._ad.run_in(self.audit_monitor_state, self.AUDIT_TIMEOUT)
 
 
 class HASensor:
